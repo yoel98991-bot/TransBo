@@ -448,15 +448,17 @@
 
     const locationChannel = supabaseClient.channel(`tracking:${DRIVER_ID}`);
 
-    function showToast(msg) {
+    function showToast(msg, isError = false) {
       const t = document.getElementById('toastMessage');
       t.innerText = msg;
+      t.style.background = isError ? '#ff4444' : '#fff';
+      t.style.color = isError ? '#fff' : '#000';
       t.className = 'toast show';
       setTimeout(() => t.className = 'toast', 3000);
     }
 
     function initMap() {
-      // Centrado inicial de respaldo en Santa Cruz, Bolivia
+      // Centrado inicial de respaldo
       map = L.map('map', { zoomControl: false, attributionControl: false }).setView([-17.7833, -63.1821], 15);
       L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map);
 
@@ -466,18 +468,32 @@
       });
       
       driverMarker = L.marker([-17.7833, -63.1821], { icon: carIcon }).addTo(map);
-      startGPS();
+      
+      // Suscribirse al canal en tiempo real desde el principio
+      locationChannel.subscribe();
       renderPanel();
     }
 
+    // Activar y leer el GPS en tiempo real
     function startGPS() {
-      if (!navigator.geolocation) return;
+      if (!navigator.geolocation) {
+        showToast("Tu dispositivo no soporta GPS", true);
+        return;
+      }
+      
+      showToast("Obteniendo tu ubicación exacta...");
+      
       gpsWatchId = navigator.geolocation.watchPosition(
         (position) => {
           const lat = position.coords.latitude;
           const lng = position.coords.longitude;
+          
           driverMarker.setLatLng([lat, lng]);
-          if (!currentTrip && isOnline) map.panTo([lat, lng]); 
+          
+          // Solo enfoca en el conductor si no hay un viaje activo dibujado
+          if (!currentTrip) {
+            map.setView([lat, lng], 16); 
+          }
 
           if (isOnline) {
             locationChannel.send({
@@ -487,13 +503,22 @@
             });
           }
         },
-        (error) => console.error("Error GPS:", error),
-        { enableHighAccuracy: true }
+        (error) => {
+          console.error("Error GPS:", error);
+          showToast("Asegúrate de permitir el acceso al GPS", true);
+        },
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
       );
-      locationChannel.subscribe();
     }
 
-    // Al encender el radar, se solicita explícitamente la ubicación actual del chofer
+    // Apagar el GPS para ahorrar batería
+    function stopGPS() {
+      if (gpsWatchId !== null) {
+        navigator.geolocation.clearWatch(gpsWatchId);
+        gpsWatchId = null;
+      }
+    }
+
     async function toggleOnlineStatus() {
       isOnline = !isOnline;
       const badge = document.getElementById('statusBadge');
@@ -502,30 +527,20 @@
       if (isOnline) {
         badge.className = 'status-badge-header online';
         statusText.innerText = 'Conectado';
-        showToast("Obteniendo ubicación GPS del conductor...");
-
-        if (navigator.geolocation) {
-          navigator.geolocation.getCurrentPosition(
-            (position) => {
-              const lat = position.coords.latitude;
-              const lng = position.coords.longitude;
-              driverMarker.setLatLng([lat, lng]);
-              if (!currentTrip) map.setView([lat, lng], 16);
-              showToast("¡Radar activo: buscando pasajeros!");
-            },
-            (error) => {
-              showToast("Radar activo (ubicación predeterminada)", true);
-            },
-            { enableHighAccuracy: true, timeout: 6000 }
-          );
-        }
+        
+        // El GPS solo arranca cuando el radar se enciende
+        startGPS();
 
         checkForPendingTrips();
         pollInterval = setInterval(checkForPendingTrips, 3000);
       } else {
         badge.className = 'status-badge-header offline';
         statusText.innerText = 'Desconectado';
-        showToast("Radar desactivado");
+        showToast("Radar y GPS desactivados");
+        
+        // Se apaga el GPS al desconectar
+        stopGPS();
+        
         if (pollInterval) clearInterval(pollInterval);
       }
       renderPanel();
@@ -540,10 +555,7 @@
         .eq('status', 'requested')
         .limit(1);
 
-      if (error) {
-        console.error("Error consultando solicitudes:", error);
-        return;
-      }
+      if (error) return;
 
       if (data && data.length > 0) {
         currentTrip = data[0];
@@ -564,7 +576,7 @@
         renderPanel();
         drawStreetRouteOnDriverMap();
       } else {
-        showToast("Error al aceptar: " + error.message);
+        showToast("Error al aceptar: " + error.message, true);
       }
     }
 
@@ -637,9 +649,11 @@
         currentTrip = null;
         showToast("Viaje finalizado con éxito");
         renderPanel();
+        
+        // Al terminar, volver a centrar en el conductor
         map.setView(driverMarker.getLatLng(), 16);
       } else {
-        showToast("Error al finalizar: " + error.message);
+        showToast("Error al finalizar: " + error.message, true);
       }
     }
 
